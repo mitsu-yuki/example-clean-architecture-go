@@ -190,9 +190,9 @@ type CreateAllTodoUseCase struct{ repo TodoRepository }
 func NewCreateAllTodoUseCase(repo TodoRepository) CreateAllTodoUseCase {
 	return CreateAllTodoUseCase{repo: repo}
 }
-func (uc CreateAllTodoUseCase) Run(ctx context.Context, todos []Todo) error {
+func (uc CreateAllTodoUseCase) Run(ctx context.Context, todos []*Todo) error {
 	for _, todo := range todos {
-		if err := uc.repo.Create(ctx, todo); err != nil {
+		if err := uc.repo.Create(ctx, *todo); err != nil {
 			return err
 		}
 	}
