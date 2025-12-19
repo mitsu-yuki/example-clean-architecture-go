@@ -6,210 +6,240 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
+	"net/mail"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/jmoiron/sqlx"
+	_ "github.com/lib/pq"
 )
 
-type Todo struct {
-	userId    int
-	id        int
-	title     string
-	completed bool
+// entity
+type User struct {
+	id         int
+	name       string
+	email      string
+	statusCode int
 }
 
-func NewTodo(userId int, id int, title string, completed bool) (*Todo, error) {
-	if userId == 0 {
-		return nil, errors.New("userId must not be 0")
+func NewUser(id int, name string, email string, statusCode int) (*User, error) {
+	if id < 1 {
+		return nil, errors.New("id must be greater than 1")
 	}
-	if id == 0 {
-		return nil, errors.New("id must not be 0")
+	if name == "" {
+		return nil, errors.New("name must not empty")
 	}
-	if title == "" {
-		return nil, errors.New("title can not be empty")
+	if _, err := mail.ParseAddress(email); err != nil {
+		return nil, err
 	}
-	return &Todo{
-		userId:    userId,
-		id:        id,
-		title:     title,
-		completed: completed,
+	return &User{
+		id:         id,
+		name:       name,
+		email:      email,
+		statusCode: statusCode,
 	}, nil
 }
-func (t Todo) UserId() int     { return t.userId }
-func (t Todo) Id() int         { return t.id }
-func (t Todo) Title() string   { return t.title }
-func (t Todo) Completed() bool { return t.completed }
 
-type TodoRepository interface {
-	FindAll(ctx context.Context) ([]*Todo, error)
-	FindById(ctx context.Context, id int) (*Todo, error)
-	Create(ctx context.Context, todo Todo) error
+func (u User) ID() int         { return u.id }
+func (u User) Name() string    { return u.name }
+func (u User) Email() string   { return u.email }
+func (u User) StatusCode() int { return u.statusCode }
+
+// entity: data access interface
+type FindUserRepository interface {
+	FindAll(ctx context.Context) ([]*User, error)
+	FindById(ctx context.Context, id int) (*User, error)
+}
+type UploadUserRepository interface {
+	Upload(ctx context.Context, user *User) error
 }
 
-type HttpTodoRepository struct{ BaseURL string }
-
-func NewHttpTodoRepository(baseURL string) TodoRepository {
-	return &HttpTodoRepository{BaseURL: baseURL}
+// infrastructure
+type PostgresFindUserRepository struct {
+	db *sqlx.DB
 }
 
-type HttpTodo struct {
-	UserId    int    `json:"userId"`
-	Id        int    `json:"id"`
-	Title     string `json:"title"`
-	Completed bool   `json:"completed"`
+func NewPostgresFindUserRepository(db *sqlx.DB) FindUserRepository {
+	return &PostgresFindUserRepository{db: db}
 }
 
-func (r HttpTodoRepository) FindAll(ctx context.Context) ([]*Todo, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.BaseURL+"/todos", nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	b, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
+type PostgresUser struct {
+	Id         int    `db:"id"`
+	Name       string `db:"name"`
+	Email      string `db:"email"`
+	StatusCode int    `db:"status_code"`
+}
 
-	var httpTodos []HttpTodo
-	if err := json.Unmarshal(b, &httpTodos); err != nil {
+func (r PostgresFindUserRepository) FindAll(ctx context.Context) ([]*User, error) {
+	query := `SELECT id, name, email, status_code FROM system.user`
+	var pgUsers []PostgresUser
+	if err := r.db.SelectContext(ctx, &pgUsers, query); err != nil {
 		return nil, err
 	}
-	var todos []*Todo
-	for _, h := range httpTodos {
-		t, err := NewTodo(h.UserId, h.Id, h.Title, h.Completed)
+	var users []*User
+	for _, pgUser := range pgUsers {
+		user, err := NewUser(pgUser.Id, pgUser.Name, pgUser.Email, pgUser.StatusCode)
 		if err != nil {
 			return nil, err
 		}
-		todos = append(todos, t)
+		users = append(users, user)
 	}
-	return todos, err
+	return users, nil
 }
 
-func (r HttpTodoRepository) FindById(ctx context.Context, id int) (*Todo, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/todos/%d", r.BaseURL, id), nil)
+func (r PostgresFindUserRepository) FindById(ctx context.Context, id int) (*User, error) {
+	query := `SELECT id, name, email, status_code FROM system.user WHERE id = :id`
+	param := map[string]int{"id": id}
+	q, args, err := sqlx.Named(query, param)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
+	var pgUser PostgresUser
+	if err := r.db.GetContext(ctx, &pgUser, q, args...); err != nil {
 		return nil, err
 	}
-	defer func() {
-		if err := resp.Body.Close(); err != nil {
-			panic(err)
-		}
-	}()
-	b, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	var h HttpTodo
-	if err := json.Unmarshal(b, &h); err != nil {
-		return nil, err
-	}
-	return NewTodo(h.UserId, h.Id, h.Title, h.Completed)
+	return NewUser(pgUser.Id, pgUser.Name, pgUser.Email, pgUser.StatusCode)
 }
 
-func (r HttpTodoRepository) Create(ctx context.Context, todo Todo) error {
-	h := HttpTodo{
-		UserId:    todo.userId,
-		Id:        todo.id,
-		Title:     todo.title,
-		Completed: todo.completed,
+type S3UploadUserRepository struct {
+	client    *s3.Client
+	bucket    string
+	keyPrefix string
+}
+
+func NewS3UploadUserRepository(client *s3.Client, bucket string, prefix string) UploadUserRepository {
+	return &S3UploadUserRepository{client: client, bucket: bucket, keyPrefix: prefix}
+}
+
+type S3User struct {
+	Id         int    `json:"id"`
+	Name       string `json:"name"`
+	Email      string `json:"email"`
+	StatusCode int    `json:"status_code"`
+}
+
+func (r S3UploadUserRepository) Upload(ctx context.Context, user *User) error {
+	s3User := S3User{
+		Id:         user.ID(),
+		Name:       user.Name(),
+		Email:      user.Email(),
+		StatusCode: user.StatusCode(),
 	}
-	b, err := json.Marshal(h)
+	data, err := json.Marshal(s3User)
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.BaseURL+"/todos", bytes.NewReader(b))
+	_, err = r.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(r.bucket),
+		Key:         aws.String(fmt.Sprintf("%s/user-%d.json", r.keyPrefix, user.ID())),
+		Body:        bytes.NewReader(data),
+		ContentType: aws.String("application/json"),
+	})
 	if err != nil {
 		return err
 	}
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return nil
-	}
-	return errors.New("http error")
-}
 
-type FindAllTodoUseCase struct{ repo TodoRepository }
-
-func NewFindAllTodoUseCase(repo TodoRepository) FindAllTodoUseCase {
-	return FindAllTodoUseCase{repo: repo}
-}
-
-func (uc FindAllTodoUseCase) Run(ctx context.Context) ([]*Todo, error) {
-	todos, err := uc.repo.FindAll(ctx)
-	if err != nil {
-		return nil, err
-	}
-	var vtodos []*Todo
-	for _, todo := range todos {
-		v, err := NewTodo(todo.UserId(), todo.Id(), todo.Title(), todo.Completed())
-		if err != nil {
-			return nil, err
-		}
-		vtodos = append(vtodos, v)
-	}
-	return vtodos, nil
-}
-
-type FindByIdTodoUseCase struct{ repo TodoRepository }
-
-func NewFindByIdTodoUseCase(repo TodoRepository) FindByIdTodoUseCase {
-	return FindByIdTodoUseCase{repo: repo}
-}
-
-func (uc FindByIdTodoUseCase) Run(ctx context.Context, id int) (*Todo, error) {
-	todo, err := uc.repo.FindById(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	return todo, nil
-}
-
-type CreateTodoUseCase struct{ repo TodoRepository }
-
-func NewCreateTodoUseCase(repo TodoRepository) CreateTodoUseCase {
-	return CreateTodoUseCase{repo: repo}
-}
-
-func (uc CreateTodoUseCase) Run(ctx context.Context, todo Todo) error {
-	return uc.repo.Create(ctx, todo)
-}
-
-type CreateAllTodoUseCase struct{ repo TodoRepository }
-
-func NewCreateAllTodoUseCase(repo TodoRepository) CreateAllTodoUseCase {
-	return CreateAllTodoUseCase{repo: repo}
-}
-func (uc CreateAllTodoUseCase) Run(ctx context.Context, todos []*Todo) error {
-	for _, todo := range todos {
-		if err := uc.repo.Create(ctx, *todo); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
+// usecase dto (I/O boundary)
+type UserDTO struct {
+	ID         int
+	Name       string
+	Email      string
+	StatusCode int
+}
+
+func userToDTO(u *User) *UserDTO {
+	return &UserDTO{
+		ID:         u.ID(),
+		Name:       u.Name(),
+		Email:      u.Email(),
+		StatusCode: u.StatusCode(),
+	}
+}
+
+func dtoToUser(dto *UserDTO) (*User, error) {
+	return NewUser(dto.ID, dto.Name, dto.Email, dto.StatusCode)
+}
+
+// usecase
+type FindAllUserUseCase struct{ repo FindUserRepository }
+
+func NewFindAllUserUseCase(r FindUserRepository) *FindAllUserUseCase {
+	return &FindAllUserUseCase{repo: r}
+}
+
+func (uc *FindAllUserUseCase) Run(ctx context.Context) ([]*UserDTO, error) {
+	users, err := uc.repo.FindAll(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var dtos []*UserDTO
+	for _, u := range users {
+		dtos = append(dtos, userToDTO(u))
+	}
+	return dtos, nil
+}
+
+type FindByIdUserUseCase struct {
+	repo FindUserRepository
+}
+
+func NewFindByIdUserUseCase(r FindUserRepository) *FindByIdUserUseCase {
+	return &FindByIdUserUseCase{repo: r}
+}
+
+func (uc *FindByIdUserUseCase) Run(ctx context.Context, id int) (*UserDTO, error) {
+	u, err := uc.repo.FindById(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return userToDTO(u), nil
+}
+
+type UploadUserUseCase struct {
+	repo UploadUserRepository
+}
+
+func NewUploadUserUseCase(r UploadUserRepository) *UploadUserUseCase {
+	return &UploadUserUseCase{repo: r}
+}
+
+func (uc *UploadUserUseCase) Run(ctx context.Context, dto *UserDTO) error {
+	u, err := dtoToUser(dto)
+	if err != nil {
+		return err
+	}
+	return uc.repo.Upload(ctx, u)
+}
+
 func main() {
-	ctx, cancel := context.WithCancelCause(context.Background())
-	defer cancel(nil)
-	repo := NewHttpTodoRepository("https://jsonplaceholder.typicode.com")
-	findAllUC := NewFindAllTodoUseCase(repo)
-	todos, err := findAllUC.Run(ctx)
+	ctx := context.Background()
+	db, err := sqlx.Connect("postgres", "postgres://user@postgres.example.com/company")
 	if err != nil {
 		panic(err)
 	}
+	cfg, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		panic(err)
+	}
+	client := s3.NewFromConfig(cfg)
 
-	for _, t := range todos {
-		fmt.Printf("%#v\n", t)
+	pgRepo := NewPostgresFindUserRepository(db)
+	s3Repo := NewS3UploadUserRepository(client, "company", "system/user")
+
+	findAllUC := NewFindAllUserUseCase(pgRepo)
+	uploadUC := NewUploadUserUseCase(s3Repo)
+
+	dtos, err := findAllUC.Run(ctx)
+	if err != nil {
+		panic(err)
+	}
+	for _, dto := range dtos {
+		if err := uploadUC.Run(ctx, dto); err != nil {
+			panic(err)
+		}
 	}
 }
