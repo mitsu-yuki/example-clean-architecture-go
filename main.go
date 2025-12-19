@@ -49,7 +49,6 @@ func (u User) StatusCode() int { return u.statusCode }
 // entity: data access interface
 type FindUserRepository interface {
 	FindAll(ctx context.Context) ([]*User, error)
-	FindById(ctx context.Context, id int) (*User, error)
 }
 type UploadUserRepository interface {
 	Upload(ctx context.Context, user *User) error
@@ -86,20 +85,6 @@ func (r PostgresFindUserRepository) FindAll(ctx context.Context) ([]*User, error
 		users = append(users, user)
 	}
 	return users, nil
-}
-
-func (r PostgresFindUserRepository) FindById(ctx context.Context, id int) (*User, error) {
-	query := `SELECT id, name, email, status_code FROM system.user WHERE id = :id`
-	param := map[string]int{"id": id}
-	q, args, err := sqlx.Named(query, param)
-	if err != nil {
-		return nil, err
-	}
-	var pgUser PostgresUser
-	if err := r.db.GetContext(ctx, &pgUser, q, args...); err != nil {
-		return nil, err
-	}
-	return NewUser(pgUser.Id, pgUser.Name, pgUser.Email, pgUser.StatusCode)
 }
 
 type S3UploadUserRepository struct {
@@ -181,22 +166,6 @@ func (uc *FindAllUserUseCase) Run(ctx context.Context) ([]*UserDTO, error) {
 		dtos = append(dtos, userToDTO(u))
 	}
 	return dtos, nil
-}
-
-type FindByIdUserUseCase struct {
-	repo FindUserRepository
-}
-
-func NewFindByIdUserUseCase(r FindUserRepository) *FindByIdUserUseCase {
-	return &FindByIdUserUseCase{repo: r}
-}
-
-func (uc *FindByIdUserUseCase) Run(ctx context.Context, id int) (*UserDTO, error) {
-	u, err := uc.repo.FindById(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	return userToDTO(u), nil
 }
 
 type UploadUserUseCase struct {
