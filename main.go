@@ -111,7 +111,7 @@ func (r S3UploadUserRepository) Upload(ctx context.Context, user *User) error {
 		Email:      user.Email(),
 		StatusCode: user.StatusCode(),
 	}
-	data, err := json.Marshal(s3User)
+	data, err := json.MarshalIndent(s3User, "", "  ")
 	if err != nil {
 		return err
 	}
