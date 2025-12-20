@@ -71,7 +71,7 @@ type PostgresUser struct {
 }
 
 func (r PostgresFindUserRepository) FindAll(ctx context.Context) ([]*User, error) {
-	query := `SELECT id, name, email, status_code FROM system.user`
+	query := `SELECT id, name, email, status_code FROM app.user`
 	var pgUsers []PostgresUser
 	if err := r.db.SelectContext(ctx, &pgUsers, query); err != nil {
 		return nil, err
@@ -197,7 +197,7 @@ func main() {
 	client := s3.NewFromConfig(cfg)
 
 	pgRepo := NewPostgresFindUserRepository(db)
-	s3Repo := NewS3UploadUserRepository(client, "company", "system/user")
+	s3Repo := NewS3UploadUserRepository(client, "company", "app/user")
 
 	findAllUC := NewFindAllUserUseCase(pgRepo)
 	uploadUC := NewUploadUserUseCase(s3Repo)
