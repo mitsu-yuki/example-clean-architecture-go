@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/mail"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -20,10 +21,11 @@ type User struct {
 	id         int
 	name       string
 	email      string
+	birthday   time.Time
 	statusCode int
 }
 
-func NewUser(id int, name string, email string, statusCode int) (*User, error) {
+func NewUser(id int, name string, email string, birthday time.Time, statusCode int) (*User, error) {
 	if id < 1 {
 		return nil, errors.New("id must be greater than 1")
 	}
@@ -33,6 +35,9 @@ func NewUser(id int, name string, email string, statusCode int) (*User, error) {
 	if _, err := mail.ParseAddress(email); err != nil {
 		return nil, err
 	}
+	if birthday.IsZero() {
+		return nil, errors.New("time must not zero value")
+	}
 	return &User{
 		id:         id,
 		name:       name,
@@ -41,10 +46,11 @@ func NewUser(id int, name string, email string, statusCode int) (*User, error) {
 	}, nil
 }
 
-func (u User) ID() int         { return u.id }
-func (u User) Name() string    { return u.name }
-func (u User) Email() string   { return u.email }
-func (u User) StatusCode() int { return u.statusCode }
+func (u User) ID() int             { return u.id }
+func (u User) Name() string        { return u.name }
+func (u User) Email() string       { return u.email }
+func (u User) Birthday() time.Time { return u.birthday }
+func (u User) StatusCode() int     { return u.statusCode }
 
 // entity: data access interface
 type FindUserRepository interface {
@@ -64,10 +70,11 @@ func NewPostgresFindUserRepository(db *sqlx.DB) FindUserRepository {
 }
 
 type PostgresUser struct {
-	Id         int    `db:"id"`
-	Name       string `db:"name"`
-	Email      string `db:"email"`
-	StatusCode int    `db:"status_code"`
+	Id         int       `db:"id"`
+	Name       string    `db:"name"`
+	Email      string    `db:"email"`
+	Birthday   time.Time `db:"birthday"`
+	StatusCode int       `db:"status_code"`
 }
 
 func (r PostgresFindUserRepository) FindAll(ctx context.Context) ([]*User, error) {
@@ -78,7 +85,7 @@ func (r PostgresFindUserRepository) FindAll(ctx context.Context) ([]*User, error
 	}
 	var users []*User
 	for _, pgUser := range pgUsers {
-		user, err := NewUser(pgUser.Id, pgUser.Name, pgUser.Email, pgUser.StatusCode)
+		user, err := NewUser(pgUser.Id, pgUser.Name, pgUser.Email, pgUser.Birthday, pgUser.StatusCode)
 		if err != nil {
 			return nil, err
 		}
@@ -101,6 +108,7 @@ type S3User struct {
 	Id         int    `json:"id"`
 	Name       string `json:"name"`
 	Email      string `json:"email"`
+	Birthday   string `json:"birthday"`
 	StatusCode int    `json:"status_code"`
 }
 
@@ -109,6 +117,7 @@ func (r S3UploadUserRepository) Upload(ctx context.Context, user *User) error {
 		Id:         user.ID(),
 		Name:       user.Name(),
 		Email:      user.Email(),
+		Birthday:   user.Birthday().Format(time.RFC3339),
 		StatusCode: user.StatusCode(),
 	}
 	data, err := json.MarshalIndent(s3User, "", "  ")
@@ -133,6 +142,7 @@ type UserDTO struct {
 	ID         int
 	Name       string
 	Email      string
+	Birthday   time.Time
 	StatusCode int
 }
 
@@ -141,12 +151,13 @@ func userToDTO(u *User) *UserDTO {
 		ID:         u.ID(),
 		Name:       u.Name(),
 		Email:      u.Email(),
+		Birthday:   u.Birthday(),
 		StatusCode: u.StatusCode(),
 	}
 }
 
 func dtoToUser(dto *UserDTO) (*User, error) {
-	return NewUser(dto.ID, dto.Name, dto.Email, dto.StatusCode)
+	return NewUser(dto.ID, dto.Name, dto.Email, dto.Birthday, dto.StatusCode)
 }
 
 // usecase
